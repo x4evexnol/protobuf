@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <functional>
@@ -387,6 +388,45 @@ TEST_F(MicroStringTest, CapacityRoundingUpStaysWithinBoundsForMicroRep) {
   // This one jumps to LargeRep
   EXPECT_GE(get_capacity_for_size(255), 256);
 }
+
+#if SIZE_MAX >= UINT64_MAX && defined(GTEST_HAS_DEATH_TEST)
+TEST_F(MicroStringTest, CapacityRoundingUpStaysWithinBoundsForOwnedRep) {
+  constexpr size_t kFourGiB = size_t{1} << 32;
+  constexpr size_t kMaxOwned = MicroString::kMaxOwnedRepCapacity;
+  static_assert(kMaxOwned == kFourGiB - 8);
+
+  const absl::string_view over_4g(reinterpret_cast<const char*>(0x1000),
+                                  kFourGiB);
+  MicroString empty;
+  EXPECT_DEATH(empty.Set(over_4g, heap_message()), "");
+  EXPECT_DEATH(empty.SetAlias(over_4g, heap_message()), "");
+
+  if (!internal::RunLargeMemoryTests() || internal::HasAnySanitizer()) return;
+
+  const auto check_size = [&](size_t size, bool expect_string_rep) {
+    // Isolate each 4 GiB allocation in a subprocess so the OS reclaims its
+    // pages immediately instead of retaining multiple spans in the allocator.
+    EXPECT_EXIT(
+        {
+          if (char* p = static_cast<char*>(calloc(size, 1))) {
+            MicroString str;
+            str.Set(absl::string_view(p, size), heap_message());
+            ABSL_CHECK_EQ(MicroStringTestPeer::IsStringRep(str),
+                          expect_string_rep);
+            if (!expect_string_rep) ABSL_CHECK_EQ(str.Capacity(), kMaxOwned);
+            ABSL_CHECK_EQ(str.Get().size(), size);
+            str.Destroy();
+            free(p);
+          }
+          std::_Exit(0);
+        },
+        testing::ExitedWithCode(0), "");
+  };
+  check_size(kMaxOwned - 7, /*expect_string_rep=*/false);
+  check_size(kMaxOwned, /*expect_string_rep=*/false);
+  check_size(kMaxOwned + 1, /*expect_string_rep=*/true);
+}
+#endif
 
 TEST_F(MicroStringTest, PoisonsTheUnusedCapacity) {
   if (!internal::HasMemoryPoisoning()) {
